@@ -1,0 +1,11 @@
+[package]
+name = "token_holders"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ethers = { version = "2.0", features = ["rustls"] }
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+dotenv = "0.15.0"
+sqlx = { version = "0.7.3", features = ["runtime-tokio-rustls", "postgres"] }
