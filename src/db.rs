@@ -1,11 +1,12 @@
 use anyhow::Result;
 use jsonapi::{api::*, jsonapi_model, model::*};
 use serde::{Deserialize, Serialize};
-use sqlx::{Decode, Error, FromRow, PgPool};
+use sqlx::{Error, FromRow, PgPool};
 use std::env;
 
-#[derive(Debug, Serialize, Deserialize, FromRow, Clone, Decode)]
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct Token {
+    #[sqlx(rename = "token_id")]
     pub id: i32,
     pub contract_addr: String,
     pub last_checked_block: i64,
@@ -13,8 +14,9 @@ pub struct Token {
     pub decimals: i16,
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow, Clone, Decode)]
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct Holder {
+    #[sqlx(rename = "holder_id")]
     pub id: i32,
     pub holder_addr: String,
 }
@@ -23,8 +25,56 @@ pub struct Holder {
 pub struct Balance {
     pub id: String,
     pub amount: String,
+    #[sqlx(flatten)]
     pub token: Token,
+    #[sqlx(flatten)]
     pub holder: Holder,
+}
+
+fn sort_to_sql(sort: Vec<String>) -> String {
+    let sort: Vec<_> = sort
+        .iter()
+        .map(|col_name| {
+            if col_name.starts_with("-") {
+                let col_name = &col_name[1..];
+                format!("{} DESC", col_name)
+            } else {
+                format!("{} ASC", col_name)
+            }
+        })
+        .collect();
+
+    format!("ORDER BY {}", sort.join(", "))
+}
+
+fn filter_to_sql(filter: HashMap<String, Vec<String>>) -> String {
+    let mut sql_conditions = Vec::new();
+
+    for (key, values) in filter.iter() {
+        let condition: String;
+
+        if key.contains("holder_addr") || key.contains("contract_addr") {
+            condition = if values.len() == 1 {
+                format!("{} = decode('{}', 'hex')", key, values[0])
+            } else {
+                format!(
+                    "{} IN (decode('{}', 'hex'))",
+                    key,
+                    values.join("', 'hex'), decode('")
+                )
+            };
+        } else {
+            condition = if values.len() == 1 {
+                format!("{} = '{}'", key, values[0])
+            } else {
+                format!("{} IN ('{}')", key, values.join("', '"))
+            };
+        }
+
+        sql_conditions.push(condition);
+    }
+
+    format!("WHERE {}", sql_conditions.join(" AND "))
 }
 
 pub async fn init_db() -> Result<PgPool> {
@@ -42,77 +92,50 @@ pub async fn init_db() -> Result<PgPool> {
 
 pub async fn all_token(
     connection_pool: &PgPool,
-    offset: i64,
-    limit: i64,
+    number: i64,
+    size: i64,
+    sort: Vec<String>,
 ) -> Result<Vec<Token>, Error> {
-    let sql = "SELECT token_id AS id,
+    let sql = format!(
+        "SELECT token_id,
         encode(contract_addr, 'hex') AS contract_addr, 
-        last_checked_block, symbol, decimals FROM token ORDER BY symbol OFFSET $1 LIMIT $2"; // TODO: delete AS
+        last_checked_block, symbol, decimals FROM token {} OFFSET $1 LIMIT $2",
+        sort_to_sql(sort)
+    );
 
-    sqlx::query_as::<_, Token>(sql)
-        .bind(offset)
-        .bind(limit)
+    sqlx::query_as::<_, Token>(&sql)
+        .bind(number * size)
+        .bind(size)
         .fetch_all(connection_pool)
         .await
 }
 
-pub async fn token_by_contract_addr(
+pub async fn all_balance_by_filter(
     connection_pool: &PgPool,
-    contract_addr: &String,
-) -> Result<Token, Error> {
-    let sql = "SELECT token_id AS id,
-        encode(contract_addr, 'hex') AS contract_addr, 
-        last_checked_block, symbol, decimals FROM token WHERE contract_addr = decode($1, 'hex')";
+    filter: HashMap<String, Vec<String>>,
+    number: i64,
+    size: i64,
+    sort: Vec<String>,
+) -> Result<Vec<Balance>, Error> {
+    let sql = format!(
+        "SELECT 
+            CONCAT(balance.holder_id, '_', balance.token_id) AS id, balance.amount::text,
+            token.token_id, encode(token.contract_addr, 'hex') AS contract_addr, 
+            token.last_checked_block, token.symbol, token.decimals,
+            holder.holder_id,
+            encode(holder.holder_addr, 'hex') AS holder_addr
+        FROM balance
+        INNER JOIN holder ON balance.holder_id = holder.holder_id
+        INNER JOIN token ON balance.token_id = token.token_id
+        {}
+        {} OFFSET $1 LIMIT $2",
+        filter_to_sql(filter),
+        sort_to_sql(sort)
+    );
 
-    sqlx::query_as::<_, Token>(sql)
-        .bind(contract_addr)
-        .fetch_one(connection_pool)
+    sqlx::query_as::<_, Balance>(&sql)
+        .bind(number * size)
+        .bind(size)
+        .fetch_all(connection_pool)
         .await
 }
-
-// pub async fn holder_by_holder_addr(connection_pool: &PgPool, holder_addr: String) -> Result<i32> {
-//     let sql = "SELECT holder_id FROM holder WHERE holder_addr = decode($1, 'hex')";
-
-//     Ok(sqlx::query_scalar::<_, i32>(sql)
-//         .bind(holder_addr)
-//         .fetch_one(connection_pool)
-//         .await?)
-// }
-
-// pub async fn all_balance_by_holder_id(
-//     connection_pool: &PgPool,
-//     holder_id: i32,
-//     offset: i64,
-//     limit: i64,
-//     order: String,
-// ) -> Result<Vec<Balance>> {
-//     let sql = format!("SELECT CONCAT(holder_id, '_', token_id) AS id,
-//         amount::text FROM balance WHERE holder_id = $1 ORDER BY balance.amount {} OFFSET $2 LIMIT $3",
-//         order);
-
-//     Ok(sqlx::query_as::<_, Balance>(sql.as_str())
-//         .bind(holder_id)
-//         .bind(offset)
-//         .bind(limit)
-//         .fetch_all(connection_pool)
-//         .await?)
-// }
-
-// pub async fn all_balance_by_token(
-//     connection_pool: &PgPool,
-//     token_id: i32,
-//     offset: i64,
-//     limit: i64,
-//     order: String,
-// ) -> Result<Vec<Balance>> {
-//     let sql = format!("SELECT CONCAT(holder_id, '_', token_id) AS id,
-//         amount::text FROM balance WHERE token_id = $1 ORDER BY balance.amount {} OFFSET $2 LIMIT $3",
-//         order);
-
-//     Ok(sqlx::query_as::<_, Balance>(sql.as_str())
-//         .bind(token_id)
-//         .bind(offset)
-//         .bind(limit)
-//         .fetch_all(connection_pool)
-//         .await?)
-// }

@@ -3,175 +3,276 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use jsonapi::{
-    model::{DocumentError, ErrorSource, JsonApiDocument, JsonApiError},
-    query::PageParams,
-};
-use std::collections::HashMap;
+use jsonapi::{model::*, query::Query};
 
-enum QueryParamsError {
-    Missing,
-    Invalid,
+enum ErrorDetails<'a> {
+    // NotAllReqValues(Vec<&'a str>),
+    CannotBeSet,
+    CannotHaveOptionalField(Vec<&'a str>),
+    LessThanZero,
+    NotOneValue,
+    OnlyOneReqField(Vec<&'a str>),
+    OnlyOneReqValue(Vec<&'a str>),
+    ReqAttribute,
 }
 
-impl QueryParamsError {
+impl ErrorDetails<'_> {
+    fn to_string(&self) -> String {
+        match self {
+            // ErrorDetails::NotAllReqValues(required_values) => format!(
+            //         "attribute does not have all required values: {}. It can also be the result of duplication of the attribute name.",
+            //         required_values.join(", ")
+            //     ),
+            ErrorDetails::CannotBeSet => "attribute cannot be set.".to_string(),
+            ErrorDetails::CannotHaveOptionalField(required_fields) => format!(
+                    "attribute cannot have optional fields names, only required: {}.",
+                    required_fields.join(", ")
+                ),
+            ErrorDetails::LessThanZero => "attribute cannot be less than zero.".to_string(),
+            ErrorDetails::NotOneValue => "attribute cannot have more than one value or no value at all.".to_string(),
+            ErrorDetails::OnlyOneReqField(required_fields) => format!(
+                    "attribute must contain only one of the required field names at a time. Required field names: {}.",
+                    required_fields.join(", ")
+                ),
+            ErrorDetails::OnlyOneReqValue(required_values) => format!(
+                    "attribute must contain only one of the required values at a time. Required values: {}.",
+                    required_values.join(", ")
+                ),
+            ErrorDetails::ReqAttribute => "attribute is required. It can also be the result of duplication of the attribute name.".to_string(),
+        }
+    }
+}
+
+enum QueryParamsError<'a> {
+    Missing(&'a str, ErrorDetails<'a>),
+    Invalid(&'a str, ErrorDetails<'a>),
+}
+
+impl QueryParamsError<'_> {
     fn get_title(&self) -> Option<String> {
         match self {
-            QueryParamsError::Missing => Some(String::from("Missing Required Attribute")),
-            QueryParamsError::Invalid => Some(String::from("Invalid Attribute Value")),
+            QueryParamsError::Missing(_, _) => Some(String::from("Missing Required Attribute")),
+            QueryParamsError::Invalid(_, _) => Some(String::from("Invalid Attribute Value")),
+        }
+    }
+
+    fn get_source(&self) -> Option<ErrorSource> {
+        match self {
+            QueryParamsError::Missing(param, _) | QueryParamsError::Invalid(param, _) => {
+                Some(ErrorSource {
+                    pointer: Some(format!("/data/attributes/{}", param)),
+                    parameter: Some(param.to_string()),
+                })
+            }
+        }
+    }
+
+    fn get_details(&self) -> Option<String> {
+        match self {
+            QueryParamsError::Missing(param, details)
+            | QueryParamsError::Invalid(param, details) => {
+                Some(format!("\'{}\' {}", param, details.to_string()))
+            }
         }
     }
 }
 
 pub struct QueryParamsValidator {
-    errors: Vec<JsonApiError>,
+    query_params: Query,
+    errors_vec: Vec<JsonApiError>,
 }
 
 impl QueryParamsValidator {
-    pub fn new() -> Self {
-        Self { errors: Vec::new() }
+    pub fn new(query_params: Query) -> Self {
+        return Self {
+            query_params,
+            errors_vec: Vec::new(),
+        };
     }
 
-    fn unbracket(param_name: &str) -> Option<(String, String)> {
-        if let Some(open_bracket) = param_name.find('[') {
-            if let Some(close_bracket) = param_name.rfind(']') {
-                if open_bracket < close_bracket {
-                    return Some((
-                        param_name[..open_bracket].to_string(),
-                        param_name[open_bracket + 1..close_bracket].to_string(),
-                    ));
-                }
-            }
-        }
-        None
-    }
-
-    fn name_to_pointer(param_name: &str) -> String {
-        match Self::unbracket(param_name) {
-            Some((param, name)) => format!("/data/attributes/{}/{}", param, name),
-            None => format!("/data/attributes/{}", param_name),
-        }
-    }
-
-    fn add_error(&mut self, param_name: &str, error: QueryParamsError, detail: Option<String>) {
-        self.errors.push(JsonApiError {
+    fn add_error(&mut self, error: QueryParamsError) {
+        self.errors_vec.push(JsonApiError {
             status: Some(String::from("400")),
             title: error.get_title(),
-            detail,
-            source: Some(ErrorSource {
-                pointer: Some(Self::name_to_pointer(param_name)),
-                parameter: Some(String::from(param_name)),
-            }),
+            detail: error.get_details(),
+            source: error.get_source(),
             ..Default::default()
         })
     }
 
-    fn add_error_if(
-        &mut self,
-        condition: bool,
-        param_name: &str,
-        error: QueryParamsError,
-        detail: Option<String>,
-    ) {
-        if condition {
-            self.add_error(param_name, error, detail);
-        }
-    }
+    pub fn valid_pagination(mut self) -> Self {
+        let page = self.query_params.page.unwrap();
 
-    fn verify_existence<T>(&mut self, param: Option<T>, required: bool, param_name: &str) -> T
-    where
-        T: Default,
-    {
-        match param {
-            Some(param) => param,
-            None => {
-                self.add_error_if(
-                    required,
-                    param_name,
-                    QueryParamsError::Missing,
-                    Some(format!("Missing required attribute \'{}\'.", param_name)),
-                );
-                Default::default()
+        let mut validate = |attribute, error_message| {
+            if attribute < 0 {
+                self.add_error(QueryParamsError::Invalid(
+                    &format!("page/{}", error_message),
+                    ErrorDetails::LessThanZero,
+                ));
             }
-        }
+        };
+
+        validate(page.size, "size");
+        validate(page.number, "number");
+
+        self
     }
 
-    pub fn check_for_errors(&mut self) -> Result<(), Response> {
-        if self.errors.is_empty() {
-            Ok(())
+    pub fn only_one_required_filter(mut self, required_filters: Vec<&str>) -> Self {
+        let filter_params = self.query_params.filter.clone();
+
+        match filter_params {
+            Some(filter_params) => {
+                let filter_len = filter_params.len();
+
+                let provided_params: Vec<_> = filter_params
+                    .into_iter()
+                    .filter(|(key, _)| required_filters.contains(&key.as_str()))
+                    .collect();
+
+                if provided_params.len() != filter_len {
+                    self.add_error(QueryParamsError::Invalid(
+                        "filter",
+                        ErrorDetails::CannotHaveOptionalField(required_filters),
+                    ))
+                } else if provided_params.len() != 1 {
+                    self.add_error(QueryParamsError::Invalid(
+                        "filter",
+                        ErrorDetails::OnlyOneReqField(required_filters),
+                    ));
+                } else {
+                    let (name, value) = provided_params.first().unwrap();
+
+                    if value.len() != 1 {
+                        self.add_error(QueryParamsError::Invalid(
+                            &format!("filter/{}", name),
+                            ErrorDetails::NotOneValue,
+                        ));
+                    }
+                }
+            }
+            None => self.add_error(QueryParamsError::Missing(
+                "filter",
+                ErrorDetails::ReqAttribute,
+            )),
+        }
+
+        self
+    }
+
+    // pub fn only_required_include(mut self, required_include: Vec<&str>) -> Self {
+    //     let include_params = self.query_params.include.clone();
+
+    //     match include_params {
+    //         Some(include_params) => {
+    //             let include_len = include_params.len();
+
+    //             let provided_params: Vec<_> = include_params
+    //                 .into_iter()
+    //                 .filter(|value| required_include.contains(&value.as_str()))
+    //                 .collect();
+
+    //             if provided_params.len() != include_len {
+    //                 self.add_error(QueryParamsError::Invalid(
+    //                     "include",
+    //                     ErrorDetails::CannotHaveOptionalField(required_include),
+    //                 ));
+    //             } else if provided_params.len() != required_include.len() {
+    //                 self.add_error(QueryParamsError::Invalid(
+    //                     "include",
+    //                     ErrorDetails::NotAllReqValues(required_include),
+    //                 ));
+    //             }
+    //         }
+    //         None => self.add_error(QueryParamsError::Missing(
+    //             "include",
+    //             ErrorDetails::ReqAttribute,
+    //         )),
+    //     }
+
+    //     self
+    // }
+
+    pub fn only_one_required_sort(mut self, required_sort: Vec<&str>) -> Self {
+        let sort_params = self.query_params.sort.clone();
+
+        match sort_params {
+            Some(sort_params) => {
+                let sort_len = sort_params.len();
+
+                let provided_params: Vec<_> = sort_params
+                    .into_iter()
+                    .filter(|value| required_sort.contains(&value.as_str()))
+                    .collect();
+
+                if provided_params.len() != sort_len {
+                    self.add_error(QueryParamsError::Invalid(
+                        "sort",
+                        ErrorDetails::CannotHaveOptionalField(required_sort),
+                    ));
+                } else if provided_params.len() != 1 {
+                    self.add_error(QueryParamsError::Invalid(
+                        "sort",
+                        ErrorDetails::OnlyOneReqValue(required_sort),
+                    ));
+                }
+            }
+            None => self.add_error(QueryParamsError::Missing(
+                "sort",
+                ErrorDetails::ReqAttribute,
+            )),
+        }
+
+        self
+    }
+
+    pub fn no_filter(mut self) -> Self {
+        if !self.query_params.filter.is_none() {
+            self.add_error(QueryParamsError::Invalid(
+                "filter",
+                ErrorDetails::CannotBeSet,
+            ))
+        }
+
+        self
+    }
+
+    pub fn no_include(mut self) -> Self {
+        if !self.query_params.include.is_none() {
+            self.add_error(QueryParamsError::Invalid(
+                "include",
+                ErrorDetails::CannotBeSet,
+            ))
+        }
+
+        self
+    }
+
+    pub fn no_fields(mut self) -> Self {
+        if !self.query_params.fields.as_ref().unwrap().is_empty() {
+            self.add_error(QueryParamsError::Invalid(
+                "fields",
+                ErrorDetails::CannotBeSet,
+            ))
+        }
+
+        self
+    }
+
+    // pub fn print(self) -> Self {
+    //     println!("{:?}", self.query_params);
+    //     self
+    // }
+
+    pub fn collect_query(self) -> Result<Query, Response> {
+        if self.errors_vec.is_empty() {
+            Ok(self.query_params)
         } else {
             let body = Json(JsonApiDocument::Error(DocumentError {
-                errors: self.errors.clone(),
+                errors: self.errors_vec,
                 ..Default::default()
             }));
-            self.errors.clear();
-
             Err((StatusCode::BAD_REQUEST, body).into_response())
-        }
-    }
-
-    pub fn pagination_parse(&mut self, page: Option<PageParams>) -> Option<(i64, i64)> {
-        match page {
-            Some(page) if page.number >= 0 && page.size >= 0 => {
-                Some((page.number * page.size, page.size))
-            }
-            Some(page) => {
-                self.add_error_if(
-                    page.number < 0,
-                    "page[number]",
-                    QueryParamsError::Invalid,
-                    Some(String::from("Page number must be positive.")),
-                );
-                self.add_error_if(
-                    page.size < 0,
-                    "page[size]",
-                    QueryParamsError::Invalid,
-                    Some(String::from("Page size must be positive.")),
-                );
-                None
-            }
-            None => None,
-        }
-    }
-
-    pub fn vec_stores_param(&mut self, vector: &Vec<String>, param_full: &str) -> Option<String> {
-        let (attribute, param) = Self::unbracket(param_full).unwrap();
-
-        if vector.contains(&param) {
-            Some(param)
-        } else {
-            self.add_error(
-                param_full,
-                QueryParamsError::Missing,
-                Some(format!(
-                    "No required \'{}\' found among the attributes \'{}\'.",
-                    param, attribute
-                )),
-            );
-            None
-        }
-    }
-
-    pub fn hashmap_stores_param(
-        &mut self,
-        hashmap: &HashMap<String, Vec<String>>,
-        param_full: &str,
-    ) -> Option<Vec<String>> {
-        let (attribute, param) = Self::unbracket(param_full).unwrap();
-
-        match hashmap.get(&param) {
-            Some(value) => Some(value.to_vec()),
-            None => {
-                self.add_error(
-                    param_full,
-                    QueryParamsError::Missing,
-                    Some(format!(
-                        "No required \'{}\' found among the attributes \'{}\'.",
-                        param, attribute
-                    )),
-                );
-                None
-            }
         }
     }
 }
@@ -216,7 +317,7 @@ fn sqlx_error_parse(error: sqlx::Error) -> Response {
             create_error_doc(
                 "422",
                 "Type Not Found",
-                format!("Type \'{}\' in query doesn't exist.", type_name),
+                format!("Type '{}' in query doesn't exist.", type_name),
             ),
         )
             .into_response(),
@@ -239,12 +340,12 @@ fn sqlx_error_parse(error: sqlx::Error) -> Response {
             create_error_doc(
                 "422",
                 "Column Not Found",
-                format!("No column found for the given name \'{}\'.", col_name),
+                format!("No column found for the given name '{}'.", col_name),
             ),
         )
             .into_response(),
 
-        sqlx::Error::ColumnDecode { index, source } => (
+        sqlx::Error::ColumnDecode { index: _, source } => (
             StatusCode::UNPROCESSABLE_ENTITY,
             create_error_doc("422", "Column Decode Error", source.to_string()),
         )
@@ -287,5 +388,28 @@ pub fn validate_sqlx_response<T>(response: Result<T, sqlx::Error>) -> Result<T, 
     match response {
         Ok(value) => Ok(value),
         Err(error) => Err(sqlx_error_parse(error)),
+    }
+}
+
+pub fn validate_vec_result<T>(
+    result: &Vec<T>,
+    expected_size: i64,
+    name: &str,
+) -> Result<(), Response> {
+    if result.len() == 0 && expected_size != 0 {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(JsonApiDocument::Error(DocumentError {
+                errors: vec![JsonApiError {
+                    status: Some(String::from("404")),
+                    title: Some(format!("{name} Not Found")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+        )
+            .into_response())
+    } else {
+        Ok(())
     }
 }
