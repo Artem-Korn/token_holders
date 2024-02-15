@@ -82,6 +82,7 @@ pub struct QueryParamsValidator {
     errors_vec: Vec<JsonApiError>,
 }
 
+// TODO: Change with macro
 impl QueryParamsValidator {
     pub fn new(query_params: Query) -> Self {
         return Self {
@@ -289,6 +290,7 @@ fn create_error_doc(status: &str, title: &str, detail: String) -> Json<JsonApiDo
     }))
 }
 
+// TODO: Change with macro
 fn sqlx_error_parse(error: sqlx::Error) -> Response {
     match error {
         sqlx::Error::Database(error) => (
@@ -411,5 +413,80 @@ pub fn validate_vec_result<T>(
             .into_response())
     } else {
         Ok(())
+    }
+}
+
+pub fn get_data_from_doc(doc: JsonApiDocument) -> Result<Resource, Response> {
+    match doc.validate() {
+        Some(error) => {
+            if error.contains(&DocumentValidationError::IncludedWithoutData) {
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(JsonApiDocument::Error(DocumentError {
+                        errors: vec![JsonApiError {
+                            status: Some(String::from("400")),
+                            title: Some(format!("Included Without Data")),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                )
+                    .into_response())
+            } else {
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(JsonApiDocument::Error(DocumentError {
+                        errors: vec![JsonApiError {
+                            status: Some(String::from("400")),
+                            title: Some(format!("Missing Content")),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                )
+                    .into_response())
+            }
+        }
+        None => match doc {
+            JsonApiDocument::Error(_) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(JsonApiDocument::Error(DocumentError {
+                    errors: vec![JsonApiError {
+                        status: Some(String::from("400")),
+                        title: Some(format!("Contains Error Data")),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })),
+            )
+                .into_response()),
+            JsonApiDocument::Data(docdata) => match docdata.data {
+                Some(PrimaryData::Single(data)) => Ok(*data),
+                Some(_) => Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(JsonApiDocument::Error(DocumentError {
+                        errors: vec![JsonApiError {
+                            status: Some(String::from("400")),
+                            title: Some(format!("Too Many Resources")),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                )
+                    .into_response()),
+                None => Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(JsonApiDocument::Error(DocumentError {
+                        errors: vec![JsonApiError {
+                            status: Some(String::from("400")),
+                            title: Some(format!("Missing Data")),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                )
+                    .into_response()),
+            },
+        },
     }
 }

@@ -5,11 +5,12 @@ edition = "2021"
 
 [dependencies]
 # Ethereum library
-ethers = { version = "2.0", features = ["rustls"] }
+ethers = { version = "2.0", features = ["rustls", "ws"] }
 # A runtime for writing asynchronous applications
 tokio = { version = "1.35", features = ["full"] }
 # A generic serialization/deserialization framework
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.113"
 # loads environment variables from a .env file
 dotenv = "0.15.0"
 # The Rust SQL Toolkit

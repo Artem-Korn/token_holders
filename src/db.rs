@@ -31,20 +31,24 @@ pub struct Balance {
     pub holder: Holder,
 }
 
-fn sort_to_sql(sort: Vec<String>) -> String {
-    let sort: Vec<_> = sort
-        .iter()
-        .map(|col_name| {
-            if col_name.starts_with("-") {
-                let col_name = &col_name[1..];
-                format!("{} DESC", col_name)
-            } else {
-                format!("{} ASC", col_name)
-            }
-        })
-        .collect();
+fn sort_to_sql(sort: Option<Vec<String>>) -> String {
+    if let Some(sort) = sort {
+        let sort: Vec<_> = sort
+            .iter()
+            .map(|col_name| {
+                if col_name.starts_with("-") {
+                    let col_name = &col_name[1..];
+                    format!("{} DESC", col_name)
+                } else {
+                    format!("{} ASC", col_name)
+                }
+            })
+            .collect();
 
-    format!("ORDER BY {}", sort.join(", "))
+        format!("ORDER BY {}", sort.join(", "))
+    } else {
+        String::new()
+    }
 }
 
 fn filter_to_sql(filter: HashMap<String, Vec<String>>) -> String {
@@ -85,7 +89,10 @@ pub async fn init_db() -> Result<PgPool> {
     let database_url = env::var("DATABASE_URL").expect("Error, missing DATABASE_URL in .env");
     let connection_pool = PgPool::connect(&database_url).await?;
 
-    // TODO: migrations
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("Unable to migrate database");
 
     Ok(connection_pool)
 }
@@ -94,7 +101,7 @@ pub async fn all_token(
     connection_pool: &PgPool,
     number: i64,
     size: i64,
-    sort: Vec<String>,
+    sort: Option<Vec<String>>,
 ) -> Result<Vec<Token>, Error> {
     let sql = format!(
         "SELECT token_id,
@@ -110,16 +117,92 @@ pub async fn all_token(
         .await
 }
 
+pub async fn all_token_count(connection_pool: &PgPool) -> Result<i64, Error> {
+    let count_sql = "SELECT COUNT(*) FROM token";
+
+    sqlx::query_scalar(count_sql)
+        .fetch_one(connection_pool)
+        .await
+}
+
+pub async fn add_token(
+    connection_pool: &PgPool,
+    contract_addr: &str,
+    last_checked_block: &i64,
+    symbol: &str,
+    decimals: &i16,
+) -> Result<i32, Error> {
+    let token_id = sqlx::query_scalar::<_, i32>(
+        "INSERT INTO token (contract_addr, last_checked_block, symbol, decimals) 
+            VALUES (
+                decode($1, 'hex'),
+                $2,
+                $3,
+                $4
+            )
+            RETURNING token_id",
+    )
+    .bind(contract_addr)
+    .bind(last_checked_block)
+    .bind(symbol)
+    .bind(decimals)
+    .fetch_one(connection_pool)
+    .await?;
+
+    Ok(token_id)
+}
+
+pub async fn update_token_last_checked_block(
+    connection_pool: &PgPool,
+    last_checked_block: &i64,
+    token_id: &i32,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE token
+                SET last_checked_block = $1
+                WHERE token_id = $2",
+    )
+    .bind(last_checked_block)
+    .bind(token_id)
+    .execute(connection_pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn add_or_get_holder(connection_pool: &PgPool, holder_addr: &str) -> Result<i32, Error> {
+    let holder_id = sqlx::query_scalar::<_, i32>(
+        "SELECT holder_id FROM holder WHERE holder_addr = decode($1, 'hex')",
+    )
+    .bind(holder_addr)
+    .fetch_optional(connection_pool)
+    .await?;
+
+    match holder_id {
+        Some(holder_id) => Ok(holder_id),
+        None => {
+            sqlx::query_scalar::<_, i32>(
+                "INSERT INTO holder (holder_addr) 
+                    VALUES (decode($1, 'hex'))
+                    RETURNING holder_id",
+            )
+            .bind(holder_addr)
+            .fetch_one(connection_pool)
+            .await
+        }
+    }
+}
+
 pub async fn all_balance_by_filter(
     connection_pool: &PgPool,
     filter: HashMap<String, Vec<String>>,
     number: i64,
     size: i64,
-    sort: Vec<String>,
+    sort: Option<Vec<String>>,
 ) -> Result<Vec<Balance>, Error> {
     let sql = format!(
         "SELECT 
-            CONCAT(balance.holder_id, '_', balance.token_id) AS id, balance.amount::text,
+            CONCAT(balance.holder_id, '_', balance.token_id) AS id, balance.amount::TEXT,
             token.token_id, encode(token.contract_addr, 'hex') AS contract_addr, 
             token.last_checked_block, token.symbol, token.decimals,
             holder.holder_id,
@@ -138,4 +221,31 @@ pub async fn all_balance_by_filter(
         .bind(size)
         .fetch_all(connection_pool)
         .await
+}
+
+pub async fn upsert_balance(
+    connection_pool: &PgPool,
+    from_holder_id: &i32,
+    to_holder_id: &i32,
+    token_id: &i32,
+    amount: &str,
+) -> Result<()> {
+    let sql = String::from(
+        "INSERT INTO balance (holder_id, token_id, amount) 
+        VALUES
+            ($1, $3, $4::NUMERIC)
+            ($2, $3, $5::NUMERIC)
+        ON CONFLICT (holder_id, token_id) DO UPDATE SET amount = balance.amount + EXCLUDED.amount",
+    );
+
+    sqlx::query(&sql)
+        .bind(from_holder_id)
+        .bind(to_holder_id)
+        .bind(token_id)
+        .bind(amount)
+        .bind(format!("-{amount}"))
+        .execute(connection_pool)
+        .await?;
+
+    Ok(())
 }
