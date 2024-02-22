@@ -21,3 +21,6 @@ anyhow = "1.0.79"
 axum = "0.7.3"
 #jsonapi serializer
 jsonapi = "0.7.0"
+#logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

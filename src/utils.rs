@@ -18,7 +18,11 @@ fn create_meta_hashmap(
     );
     let link_2 = ",page[size]=";
 
-    let last = total_count / page.size - 1;
+    let last = if page.size != 0 {
+        total_count / page.size - 1
+    } else {
+        0
+    };
 
     if page.number != 0 {
         links.insert(
@@ -53,14 +57,18 @@ fn create_meta_hashmap(
         );
     }
 
-    if page.number != last {
+    if page.number < last {
         links.insert(
             "last".to_string(),
-            json!(format!("{}{}{}{}", link_1, page.number, link_2, page.size)),
+            json!(format!("{}{}{}{}", link_1, last, link_2, page.size)),
         );
     }
 
-    Some(links)
+    if links.is_empty() {
+        None
+    } else {
+        Some(links)
+    }
 }
 
 pub fn vec_to_jsonapi_document<T: JsonApiModel>(

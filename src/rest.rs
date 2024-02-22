@@ -1,21 +1,27 @@
 use axum::{
     extract::{self, RawQuery},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Extension, Json, Router,
 };
+use ethers::providers::{Provider, Ws};
 use jsonapi::{model::*, query};
 use sqlx::PgPool;
-use std::vec;
+use std::{sync::Arc, vec};
 
 use crate::{
-    db, utils,
+    db, evm, utils,
     validators::{self, QueryParamsValidator as QPV},
 };
 
-pub fn create_router(connection_pool: PgPool) -> Router {
+pub fn create_router(connection_pool: PgPool, provider: Arc<Provider<Ws>>) -> Router {
     Router::new()
-        .route("/tokens", get(get_tokens).post(post_token))
+        .route(
+            "/tokens",
+            get(get_tokens)
+                .post(move |extension, body| post_token(extension, body, provider.clone())),
+        )
         .route("/balances", get(get_balances))
         .layer(Extension(connection_pool))
 }
@@ -71,6 +77,8 @@ async fn get_balances(
         .no_include()
         .collect_query()?;
 
+    let filter = query_params.filter.clone().unwrap(); //TODO
+
     let balances = validators::validate_sqlx_response(
         db::all_balance_by_filter(
             &cp,
@@ -84,7 +92,8 @@ async fn get_balances(
 
     validators::validate_vec_result(&balances, query_params.page.unwrap().size, "Balances")?;
 
-    let total_count = validators::validate_sqlx_response(db::all_token_count(&cp).await)?;
+    let total_count =
+        validators::validate_sqlx_response(db::all_balance_by_filter_count(&cp, filter).await)?;
 
     Ok(Json(utils::vec_to_jsonapi_document(
         balances,
@@ -99,17 +108,20 @@ async fn post_token(
     // TODO: evm connected creation
     Extension(cp): Extension<PgPool>,
     extract::Json(doc): Json<JsonApiDocument>,
+    provider: Arc<Provider<Ws>>,
 ) -> Result<Response, Response> {
     let data = validators::get_data_from_doc(doc)?;
-    todo!()
-    // match data.get_attribute("contract_addr") {
-    //     Some(value) => match value.as_str() {
-    //         None => Err(Json("Missing data").into_response()),
-    //         Some(contract_addr) => {
-    //             let token = validate_sqlx_response(add_token(&cp, todo!()).await)?;
-    //             Ok((StatusCode::CREATED, Json(token.to_jsonapi_document())).into_response())
-    //         }
-    //     },
-    //     None => Err(Json("Missing 'contract_addr' attribute").into_response()),
-    // }
+    match data.get_attribute("contract_addr") {
+        Some(value) => match value.as_str() {
+            None => Err(Json("Missing data").into_response()),
+            Some(contract_addr) => {
+                if let Ok(token) = evm::add_token_by_contract(&cp, contract_addr).await {
+                    Ok((StatusCode::CREATED, Json(token.to_jsonapi_document())).into_response())
+                } else {
+                    Err(Json("Add token by contract error").into_response())
+                }
+            }
+        },
+        None => Err(Json("Missing 'contract_addr' attribute").into_response()),
+    }
 }

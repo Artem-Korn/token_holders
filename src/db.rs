@@ -33,17 +33,17 @@ pub struct Balance {
 
 fn sort_to_sql(sort: Option<Vec<String>>) -> String {
     if let Some(sort) = sort {
-        let sort: Vec<_> = sort
-            .iter()
-            .map(|col_name| {
-                if col_name.starts_with("-") {
-                    let col_name = &col_name[1..];
-                    format!("{} DESC", col_name)
-                } else {
-                    format!("{} ASC", col_name)
-                }
-            })
-            .collect();
+        // let sort: Vec<_> = sort
+        //     .iter()
+        //     .map(|col_name| {
+        //         if col_name.starts_with("-") {
+        //             let col_name = &col_name[1..];
+        //             format!("{} DESC", col_name)
+        //         } else {
+        //             format!("{} ASC", col_name)
+        //         }
+        //     })
+        //     .collect();
 
         format!("ORDER BY {}", sort.join(", "))
     } else {
@@ -210,7 +210,7 @@ pub async fn all_balance_by_filter(
         FROM balance
         INNER JOIN holder ON balance.holder_id = holder.holder_id
         INNER JOIN token ON balance.token_id = token.token_id
-        {}
+        {} AND balance.amount > 0
         {} OFFSET $1 LIMIT $2",
         filter_to_sql(filter),
         sort_to_sql(sort)
@@ -223,6 +223,22 @@ pub async fn all_balance_by_filter(
         .await
 }
 
+pub async fn all_balance_by_filter_count(
+    connection_pool: &PgPool,
+    filter: HashMap<String, Vec<String>>,
+) -> Result<i64, Error> {
+    let sql = format!(
+        "SELECT COUNT(*)
+        FROM balance
+        INNER JOIN holder ON balance.holder_id = holder.holder_id
+        INNER JOIN token ON balance.token_id = token.token_id
+        {} AND balance.amount > 0",
+        filter_to_sql(filter)
+    );
+
+    sqlx::query_scalar(&sql).fetch_one(connection_pool).await
+}
+
 pub async fn upsert_balance(
     connection_pool: &PgPool,
     from_holder_id: &i32,
@@ -233,7 +249,7 @@ pub async fn upsert_balance(
     let sql = String::from(
         "INSERT INTO balance (holder_id, token_id, amount) 
         VALUES
-            ($1, $3, $4::NUMERIC)
+            ($1, $3, $4::NUMERIC),
             ($2, $3, $5::NUMERIC)
         ON CONFLICT (holder_id, token_id) DO UPDATE SET amount = balance.amount + EXCLUDED.amount",
     );
@@ -242,8 +258,8 @@ pub async fn upsert_balance(
         .bind(from_holder_id)
         .bind(to_holder_id)
         .bind(token_id)
-        .bind(amount)
         .bind(format!("-{amount}"))
+        .bind(amount)
         .execute(connection_pool)
         .await?;
 
