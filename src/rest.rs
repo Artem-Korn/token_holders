@@ -1,3 +1,8 @@
+use crate::{
+    db::{self, Token},
+    evm, utils,
+    validators::{self, QueryParamsValidator as QPV},
+};
 use axum::{
     extract::{self, RawQuery},
     http::StatusCode,
@@ -5,22 +10,16 @@ use axum::{
     routing::get,
     Extension, Json, Router,
 };
-use ethers::providers::{Provider, Ws};
 use jsonapi::{model::*, query};
 use sqlx::PgPool;
-use std::{sync::Arc, vec};
+use std::vec;
+use tokio::sync::mpsc;
 
-use crate::{
-    db, evm, utils,
-    validators::{self, QueryParamsValidator as QPV},
-};
-
-pub fn create_router(connection_pool: PgPool, provider: Arc<Provider<Ws>>) -> Router {
+pub fn create_router(connection_pool: PgPool, tx: mpsc::Sender<Token>) -> Router {
     Router::new()
         .route(
             "/tokens",
-            get(get_tokens)
-                .post(move |extension, body| post_token(extension, body, provider.clone())),
+            get(get_tokens).post(move |extension, body| post_token(extension, body, tx)),
         )
         .route("/balances", get(get_balances))
         .layer(Extension(connection_pool))
@@ -105,10 +104,9 @@ async fn get_balances(
 }
 
 async fn post_token(
-    // TODO: evm connected creation
     Extension(cp): Extension<PgPool>,
     extract::Json(doc): Json<JsonApiDocument>,
-    provider: Arc<Provider<Ws>>,
+    tx: mpsc::Sender<Token>,
 ) -> Result<Response, Response> {
     let data = validators::get_data_from_doc(doc)?;
     match data.get_attribute("contract_addr") {
@@ -116,7 +114,12 @@ async fn post_token(
             None => Err(Json("Missing data").into_response()),
             Some(contract_addr) => {
                 if let Ok(token) = evm::add_token_by_contract(&cp, contract_addr).await {
-                    Ok((StatusCode::CREATED, Json(token.to_jsonapi_document())).into_response())
+                    let send = tx.send(token.clone()).await;
+                    match send {
+                        Ok(_) => Ok((StatusCode::CREATED, Json(token.to_jsonapi_document()))
+                            .into_response()),
+                        Err(err) => Err(Json(err.to_string()).into_response()),
+                    }
                 } else {
                     Err(Json("Add token by contract error").into_response())
                 }

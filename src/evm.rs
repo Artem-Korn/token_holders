@@ -3,13 +3,18 @@ use anyhow::Result;
 use ethers::{prelude::ProviderError::JsonRpcClientError, prelude::*, utils::hex::ToHex};
 use sqlx::PgPool;
 use std::{env, sync::Arc};
+use tokio::sync::mpsc;
 
 pub async fn create_provider() -> Result<Arc<Provider<Ws>>> {
     let provider = Provider::<Ws>::connect(env::var("RPC_URL_WS")?).await?;
     Ok(Arc::new(provider))
 }
 
-pub async fn update_db(connection_pool: PgPool, provider: Arc<Provider<Ws>>) -> Result<()> {
+pub async fn update_db(
+    connection_pool: PgPool,
+    provider: Arc<Provider<Ws>>,
+    mut rx: mpsc::Receiver<Token>,
+) -> Result<()> {
     let mut token_count = db::all_token_count(&connection_pool).await?;
 
     if token_count == 0 {
@@ -27,11 +32,18 @@ pub async fn update_db(connection_pool: PgPool, provider: Arc<Provider<Ws>>) -> 
         ));
     }
 
-    while let Some(res) = set.join_next().await {
-        let _ = res?;
+    loop {
+        tokio::select! {
+            Some(res) = set.join_next() => res??, //TODO: Check if its skip err when spawn new task
+            Some(token) = rx.recv() => {
+                set.spawn(add_balances_by_token(
+                    connection_pool.clone(),
+                    provider.clone(),
+                    token.clone(),
+                ));
+            }
+        }
     }
-
-    Ok(())
 }
 
 async fn add_start_tokens(connection_pool: &PgPool) -> Result<i64> {
@@ -39,7 +51,7 @@ async fn add_start_tokens(connection_pool: &PgPool) -> Result<i64> {
         "50327c6c5a14DCaDE707ABad2E27eB517df87AB5", //trx 24,352
         "582d872A1B094FC48F5DE31D3B73F2D9bE47def1", //toncoin 94,646
         "2AF5D2aD76741191D15Dfe7bF6aC92d4Bd912Ca3", //leo 41,588
-        "e28b3B32B6c345A34Ff64674606124Dd5Aceca30", //inj 493,857
+        // "e28b3B32B6c345A34Ff64674606124Dd5Aceca30", //inj 493,857
         "c5f0f7b66764F6ec8C8Dff7BA683102295E16409", //fdusd 3,976
     ];
 
@@ -119,7 +131,7 @@ async fn add_balances_by_token(
                     if actual_last_block - last_block > 10 {
                         last_block = actual_last_block;
                     }
-                    step = actual_last_block - from;
+                    step = last_block - from;
                 }
             }
             Err(JsonRpcClientError(err)) if err.to_string().contains("code: -32005") => {
@@ -195,21 +207,23 @@ pub async fn log_listener(
     let mut stream = provider.subscribe_logs(&filter).await?;
 
     while let Some(log) = stream.next().await {
-        db::update_token_last_checked_block(
-            &connection_pool,
-            &log.block_number.unwrap().as_u32().into(),
-            &token.id,
-        )
-        .await?;
-
-        upsert_balance_from_log(&connection_pool, &log, &token.id).await?;
-
         tracing::debug!(
-            "NewLog: Token: {}; Block: {}; Hash: {};",
+            "NewLog: Token: {}; Block: {:?}; Hash: {:?};",
             token.contract_addr,
-            &log.block_number.unwrap(),
-            &log.transaction_hash.unwrap()
+            &log.block_number,
+            &log.transaction_hash
         );
+
+        if let Some(block_num) = log.block_number {
+            db::update_token_last_checked_block(
+                &connection_pool,
+                &block_num.as_u32().into(),
+                &token.id,
+            )
+            .await?;
+
+            upsert_balance_from_log(&connection_pool, &log, &token.id).await?;
+        }
     }
 
     Ok(())

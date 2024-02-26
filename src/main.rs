@@ -6,7 +6,7 @@ mod validators;
 
 use anyhow::Result;
 use axum::Router;
-use tokio::{net::TcpListener, try_join};
+use tokio::{net::TcpListener, sync::mpsc, try_join};
 
 async fn serve_wrapper(listener: TcpListener, app: Router) -> Result<()> {
     Ok(axum::serve(listener, app).await?)
@@ -37,8 +37,11 @@ async fn main() -> Result<()> {
         .await
         .expect("Error connecting to the database");
 
+    // Сreate a channel to add a new token update task
+    let (tx, rx) = mpsc::channel(1);
+
     // Create router and tcp listener
-    let app = rest::create_router(connection_pool.clone(), provider.clone());
+    let app = rest::create_router(connection_pool.clone(), tx);
     let listener = TcpListener::bind(format!(
         "{}:{}",
         std::env::var("SERVICE_IP")?,
@@ -50,7 +53,7 @@ async fn main() -> Result<()> {
     // Update db from evm network
     // Running a service
     try_join!(
-        evm::update_db(connection_pool, provider),
+        evm::update_db(connection_pool, provider, rx),
         serve_wrapper(listener, app)
     )?;
 
