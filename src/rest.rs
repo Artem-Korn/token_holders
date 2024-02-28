@@ -1,7 +1,7 @@
 use crate::{
     app_err_response,
     db::{self, Token},
-    error::AppErrorResponse,
+    error::{AppError, AppErrorResponse},
     evm, utils,
     validators::QueryParamsValidator as QPV,
 };

@@ -17,7 +17,7 @@ impl QueryParamsValidator {
         }
     }
 
-    fn add_error(mut self, message: &str) {
+    fn add_error(&mut self, message: &str) {
         self.errors_vec.push(AppError::new(
             StatusCode::BAD_REQUEST,
             message,
@@ -66,11 +66,14 @@ impl QueryParamsValidator {
             .collect()
     }
 
-    fn unwrap<T: Default>(mut self, collection: Option<T>) -> T {
+    fn unwrap<T: Default>(&mut self, collection: Option<T>) -> T {
         match collection {
             Some(collection) => collection,
             None => {
-                let message = format!("'{}' attribute is missing", self.cur_param_name);
+                let message = format!(
+                    "'{}' attribute is missing or duplicated",
+                    self.cur_param_name
+                );
                 self.add_error(&message);
 
                 Default::default()
@@ -78,14 +81,14 @@ impl QueryParamsValidator {
         }
     }
 
-    fn no<T>(mut self, collection: Option<T>) {
+    fn no<T>(&mut self, collection: Option<T>) {
         if collection.is_some() {
             let message = format!("'{}' attribute cannot be set", self.cur_param_name);
             self.add_error(&message);
         }
     }
 
-    fn only(mut self, vector_len: usize, valid_vector_len: usize, required: &Vec<&str>) {
+    fn only(&mut self, vector_len: usize, valid_vector_len: usize, required: &Vec<&str>) {
         if vector_len != valid_vector_len {
             let message = format!(
                 "'{}' attribute cannot have optional values. Required values: {}",
@@ -96,7 +99,7 @@ impl QueryParamsValidator {
         }
     }
 
-    fn one(mut self, vector_len: usize, valid_vector_len: usize, required: &Vec<&str>) {
+    fn one(&mut self, vector_len: usize, valid_vector_len: usize, required: &Vec<&str>) {
         if vector_len != valid_vector_len {
             let message = format!(
                 "'{}' attribute cannot have more then one of required values. Required values: {}",
@@ -107,7 +110,7 @@ impl QueryParamsValidator {
         }
     }
 
-    fn only_one(mut self, vector: Vec<String>, required_vector: Vec<&str>) {
+    fn only_one(&mut self, vector: Vec<String>, required_vector: Vec<&str>) {
         let vector_len = vector.len();
         let valid_vector = Self::valid_vector(vector, &required_vector);
         let valid_vector_len = valid_vector.len();
@@ -118,21 +121,23 @@ impl QueryParamsValidator {
 
     pub fn no_filter(mut self) -> Self {
         self.cur_param_name = "filter".to_string();
-        self.no(self.query_params.filter);
+        self.no(self.query_params.filter.clone());
 
         self
     }
 
     pub fn no_include(mut self) -> Self {
         self.cur_param_name = "include".to_string();
-        self.no(self.query_params.include);
+        self.no(self.query_params.include.clone());
 
         self
     }
 
     pub fn no_fields(mut self) -> Self {
         self.cur_param_name = "fields".to_string();
-        self.no(self.query_params.fields);
+        if !self.query_params.fields.clone().unwrap().is_empty() {
+            self.no(Some(()));
+        }
 
         self
     }

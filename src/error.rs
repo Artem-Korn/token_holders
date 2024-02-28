@@ -23,7 +23,7 @@ impl AppError {
         detail: Option<&str>,
         param_name: Option<&str>,
     ) -> Self {
-        tracing::error!("AppError: {}", error.to_string());
+        tracing::error!("{}", error.to_string());
 
         Self {
             body: JsonApiError {
@@ -57,7 +57,7 @@ impl AppErrorResponse {
         Self {
             code,
             body: Json(JsonApiDocument::Error(DocumentError {
-                errors: errors.iter().map(|err| err.body).collect(),
+                errors: errors.iter().map(|err| err.body.clone()).collect(),
                 ..Default::default()
             })),
         }
