@@ -1,4 +1,5 @@
 mod db;
+mod error;
 mod evm;
 mod rest;
 mod utils;
@@ -6,14 +7,18 @@ mod validators;
 
 use anyhow::Result;
 use axum::Router;
-use tokio::{net::TcpListener, sync::mpsc, try_join};
+use tokio::{net::TcpListener, sync::mpsc};
 
+/// Wrapper to use try methods
 async fn serve_wrapper(listener: TcpListener, app: Router) -> Result<()> {
     Ok(axum::serve(listener, app).await?)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment vars from .env
+    dotenv::dotenv().expect("Error loading variables from .env file");
+
     // Configuring a fmt subscriber and set it as default
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing::level_filters::LevelFilter::OFF.into())
@@ -23,9 +28,6 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::fmt()
         .with_env_filter(filter)
         .init();
-
-    // Load environment vars from .env
-    dotenv::dotenv().expect("Error loading variables from .env file");
 
     // Create connection with evm
     let provider = evm::create_provider()
@@ -52,7 +54,8 @@ async fn main() -> Result<()> {
 
     // Update db from evm network
     // Running a service
-    try_join!(
+    // TODO: Make it as tasks
+    tokio::try_join!(
         evm::update_db(connection_pool, provider, rx),
         serve_wrapper(listener, app)
     )?;

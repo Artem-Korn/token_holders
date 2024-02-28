@@ -5,11 +5,13 @@ use sqlx::PgPool;
 use std::{env, sync::Arc};
 use tokio::sync::mpsc;
 
+/// Create websocket provider
 pub async fn create_provider() -> Result<Arc<Provider<Ws>>> {
     let provider = Provider::<Ws>::connect(env::var("RPC_URL_WS")?).await?;
     Ok(Arc::new(provider))
 }
 
+/// Add tokens to db if its empty and start updating all tokens
 pub async fn update_db(
     connection_pool: PgPool,
     provider: Arc<Provider<Ws>>,
@@ -34,7 +36,7 @@ pub async fn update_db(
 
     loop {
         tokio::select! {
-            Some(res) = set.join_next() => res??, //TODO: Check if its skip err when spawn new task
+            Some(res) = set.join_next() => res??, //BUG: Check if its skip err when spawn new task
             Some(token) = rx.recv() => {
                 set.spawn(add_balances_by_token(
                     connection_pool.clone(),
@@ -46,12 +48,13 @@ pub async fn update_db(
     }
 }
 
+/// Add some start tokens to db (TRX, TONCOIN, LEO, INJ, FDUSD)
 async fn add_start_tokens(connection_pool: &PgPool) -> Result<i64> {
     let addresses = vec![
         "50327c6c5a14DCaDE707ABad2E27eB517df87AB5", //trx 24,352
         "582d872A1B094FC48F5DE31D3B73F2D9bE47def1", //toncoin 94,646
         "2AF5D2aD76741191D15Dfe7bF6aC92d4Bd912Ca3", //leo 41,588
-        // "e28b3B32B6c345A34Ff64674606124Dd5Aceca30", //inj 493,857
+        "e28b3B32B6c345A34Ff64674606124Dd5Aceca30", //inj 493,857
         "c5f0f7b66764F6ec8C8Dff7BA683102295E16409", //fdusd 3,976
     ];
 
@@ -62,21 +65,32 @@ async fn add_start_tokens(connection_pool: &PgPool) -> Result<i64> {
     Ok(addresses.len() as i64)
 }
 
+/// Add token to db using contract address
 pub async fn add_token_by_contract(connection_pool: &PgPool, contract_addr: &str) -> Result<Token> {
-    let symbol = "TEST";
-    let decimals = 6;
+    let symbol = "UNKNOWN".to_string();
+    let decimals = 0;
+    let last_checked_block = -1;
 
-    let token_id = db::add_token(connection_pool, contract_addr, &-1, symbol, &decimals).await?;
+    let token_id = db::add_token(
+        connection_pool,
+        contract_addr,
+        &last_checked_block,
+        &symbol,
+        &decimals,
+    )
+    .await?;
 
     Ok(Token {
         id: token_id,
         contract_addr: contract_addr.to_string(),
-        last_checked_block: -1,
-        symbol: symbol.to_string(),
+        last_checked_block,
+        symbol,
         decimals,
     })
 }
 
+/// Add balances to db from evm network
+/// and subscribe on new logs for this token
 async fn add_balances_by_token(
     connection_pool: PgPool,
     provider: Arc<Provider<Ws>>,
@@ -154,6 +168,7 @@ async fn add_balances_by_token(
     Ok(())
 }
 
+/// Insert new holders from log and upsert balance
 async fn upsert_balance_from_log(
     connection_pool: &PgPool,
     log: &Log,
@@ -187,6 +202,7 @@ async fn upsert_balance_from_log(
     Ok(())
 }
 
+/// Subscribe on new logs for token from evm network
 pub async fn log_listener(
     connection_pool: PgPool,
     provider: Arc<Provider<Ws>>,
